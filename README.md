@@ -32,10 +32,10 @@ git clone git@github.com:nqminds/FileDOWN.git
 
 ### Cozy stores the database in: ###
 
-[OpenWRT] ~/.emails
+[OpenWRT] /root/.emails
 
 [Linux/Ubuntu] ~/user/.emails
 
-The attachments are located in ./emails/attachments
+The attachments (for OpenWRT) are located in /root/emails/attachments
 
-The database is located in the directories ./emails/db, ./emails/db-mrview-*
+The database (for OpenWRT) is located in the directories /root/emails/db, /root/emails/db-mrview-*
