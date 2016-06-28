@@ -6,7 +6,7 @@ Modern Email Client Based on Node.js and React.js with a new package [FileDOWN](
 Clone the git repository:
 
 ```
-git@github.com:nqminds/cozy-emails.git
+git clone git@github.com:nqminds/cozy-emails.git
 ```
 
 
