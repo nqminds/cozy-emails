@@ -22,9 +22,7 @@ Run Emails with the command line, it will listen on the 9125 port:
 Cozy emails relies on LevelDB to store the database, which acts as an adapter to PouchDB. In this git version the LevelDB adapter was changed to FileDOWN (package developed on top of MemDOWN):
 
 ```
-#!git clone git@bitbucket.org:Mereacre/filedown.git
-
-git clone git@bitbucket.org:Mereacre/filedown.git
+git clone git@github.com:nqminds/FileDOWN.git
 ```
 
 ### The FileDOWN dependence was added to: ###
