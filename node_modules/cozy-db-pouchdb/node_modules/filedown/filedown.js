@@ -1,0 +1,460 @@
+var inherits          = require('inherits')
+  , AbstractLevelDOWN = require('abstract-leveldown').AbstractLevelDOWN
+  , AbstractIterator  = require('abstract-leveldown').AbstractIterator
+  , ltgt              = require('ltgt')
+  , setImmediate      = global.setImmediate || process.nextTick
+  , createRBT = require('functional-red-black-tree')
+  , fs				  = require('fs')
+  , globalStore       = {}
+
+var mkdir = require('mkdirp');
+
+function toKey (key) {
+  return typeof key == 'string' ? '$' + key : JSON.stringify(key)
+}
+
+function gt(value) {
+  return ltgt.compare(value, this._end) > 0
+}
+
+function gte(value) {
+  return ltgt.compare(value, this._end) >= 0
+}
+
+function lt(value) {
+  return ltgt.compare(value, this._end) < 0
+}
+
+function lte(value) {
+  return ltgt.compare(value, this._end) <= 0
+}
+
+
+function MemIterator (db, options) {
+  AbstractIterator.call(this, db)
+  this._limit   = options.limit
+
+  if (this._limit === -1)
+    this._limit = Infinity
+
+  var tree = db._store[db._location];
+
+  this.keyAsBuffer = options.keyAsBuffer !== false
+  this.valueAsBuffer = options.valueAsBuffer !== false
+  this._reverse   = options.reverse
+  this._options = options
+  this._done = 0
+
+  if (!this._reverse) {
+    this._incr = 'next';
+    this._start = ltgt.lowerBound(options);
+    this._end = ltgt.upperBound(options)
+
+    if (typeof this._start === 'undefined')
+      this._tree = tree.begin;
+    else if (ltgt.lowerBoundInclusive(options))
+      this._tree = tree.ge(this._start);
+    else
+      this._tree = tree.gt(this._start);
+
+    if (this._end) {
+      if (ltgt.upperBoundInclusive(options))
+        this._test = lte
+      else
+        this._test = lt
+    }
+
+  } else {
+    this._incr = 'prev';
+    this._start = ltgt.upperBound(options)
+    this._end = ltgt.lowerBound(options)
+
+    if (typeof this._start === 'undefined')
+      this._tree = tree.end;
+    else if (ltgt.upperBoundInclusive(options))
+      this._tree = tree.le(this._start)
+    else
+      this._tree = tree.lt(this._start)
+
+    if (this._end) {
+      if (ltgt.lowerBoundInclusive(options))
+        this._test = gte
+      else
+        this._test = gt
+    }
+
+  }
+
+}
+
+inherits(MemIterator, AbstractIterator)
+
+MemIterator.prototype._next = function (callback) {
+  var key
+    , value
+
+  if (this._done++ >= this._limit)
+    return setImmediate(callback)
+
+  if (!this._tree.valid)
+    return setImmediate(callback)
+
+  key = this._tree.key
+  value = this._tree.value
+
+  if (!this._test(key))
+    return setImmediate(callback)
+
+  if (this.keyAsBuffer)
+    key = new Buffer(key)
+
+  if (this.valueAsBuffer)
+    value = new Buffer(value)
+
+  this._tree[this._incr]()
+
+  setImmediate(function callNext() {
+    callback(null, key, value)
+  })
+}
+
+MemIterator.prototype._test = function () {return true}
+
+
+function ReadNode(dir,node,cb) {
+	fs.readFile(dir+"/"+node, 'utf8', function(err, data){
+		if(err) throw err;
+		else cb(data);
+	});
+}
+
+function WriteNode(dir, node, data, cb) {
+	fs.writeFile(dir+"/"+node, data, 'utf8', function(err){
+		if(err && err.errno!=-2) throw err;
+		else cb();
+	});
+}
+
+function FileDOWN (location) {
+  var self = this;
+	
+  if (!(this instanceof FileDOWN))
+    return new FileDOWN(location)
+
+  this.defaultnode = {'node':0, 'next':0, 'prev':0, 'key':'0', 'value':'0'};
+  this.keydict = {};
+  AbstractLevelDOWN.call(this, typeof location == 'string' ? location : '')
+
+  this._location = this.location ? toKey(this.location) : '_tree'
+  this._store = this.location ? globalStore: this
+  this._store[this._location] = this._store[this._location] || createRBT(ltgt.compare)
+}
+
+function ReadBaseNode(dir, cb) {
+	var self = this;
+
+	fs.readFile(dir+"/"+"0", 'utf8', function(err,data){
+		if(err && err.errno==-2) {
+        	fs.writeFile(dir+"/"+"0", JSON.stringify(self.defaultnode), 'utf8', function(err){
+				if(err) throw err;
+				else cb(self.defaultnode);
+            });
+        }else if (err && err.errno!=-2) throw err;
+        else cb(JSON.parse(data));
+    });
+}
+
+
+FileDOWN.clearGlobalStore = function (strict) {
+  if (strict) {
+    Object.keys(globalStore).forEach(function (key) {
+      delete globalStore[key];
+    })
+  } else {
+    globalStore = {}
+  }
+}
+
+inherits(FileDOWN, AbstractLevelDOWN)
+
+FileDOWN.prototype.InsertFileKeys = function(dir, keys, cb) {
+	var self = this;
+
+	if(keys === null || keys === undefined) cb();
+	
+	if(!keys.length) cb();
+	else {
+		var key = keys.pop();
+		var value = this._store[this._location].get(key);
+		var filedata = {};
+
+		this.keydict[key] = this.tail.node+1;
+		filedata.node = this.tail.node+1;
+		filedata.next = 0;
+		filedata.prev = this.tail.node;
+		filedata.key = key;
+		filedata.value = value;
+		WriteNode(dir, filedata.node.toString(), JSON.stringify(filedata), function(){
+    		self.tail.next = filedata.node;
+			WriteNode(dir, self.tail.node.toString(), JSON.stringify(self.tail), function(){
+				self.tail = {node:filedata.node, next:filedata.next, prev:filedata.prev, key:filedata.key, value:filedata.value};
+				self.InsertFileKeys(dir, keys, cb);
+			});
+    	});
+	}
+}
+
+FileDOWN.prototype.UpdateFileKeys = function(dir, keys, cb) {
+	var self = this;
+
+    if(keys === null || keys === undefined) cb();
+
+	if(!keys.length) cb();
+    else {
+		var key = keys.pop();
+		if (key in this.keydict) {
+			var value = this._store[this._location].get(key);
+			ReadNode(dir, this.keydict[key].toString(), function(data) {
+				var filedata = JSON.parse(data);
+				filedata.value = value;
+				WriteNode(dir, self.keydict[key].toString(), JSON.stringify(filedata), function(){
+					self.UpdateFileKeys(dir, keys, cb);
+				});
+			});
+		} else {
+			throw "Error: No key in dictionary!";
+		}
+	}
+}
+
+FileDOWN.prototype.DeleteFileKeys = function (dir, keys, cb) {
+	var self = this;
+	var filedata, filedatanext, filedataprev;
+
+	if(keys === null || keys === undefined) cb();
+  	else	
+
+	if(!keys.length) cb();
+	else {
+		var key = keys.pop();
+		if(key in this.keydict) {
+			if (this.keydict[key] == this.tail.node) {
+				ReadNode(dir, this.tail.prev.toString(), function(data) {
+					filedata = JSON.parse(data);
+					filedata.next = 0;
+                	WriteNode(dir, filedata.node.toString(), JSON.stringify(filedata), function(){
+						fs.unlink(dir+"/"+self.keydict[key].toString(), function(err){
+							if(err) throw err;
+							else {
+								self.tail = {node:filedata.node, next:filedata.next, prev:filedata.prev, key:filedata.key, value:filedata.value};
+								delete self.keydict[key];
+								DeleteFileKeys(dir, keys, cb);
+							}
+						});
+					});
+				});
+			} else {
+				ReadNode(dir, this.keydict[key].toString(), function(data) {
+					filedata = JSON.parse(data);
+					ReadNode(dir, filedata.prev.toString(), function(dataprev) {
+						filedataprev = JSON.parse(dataprev);
+                    	ReadNode(dir, filedata.next.toString(), function(datanext) {
+			            	filedatanext = JSON.parse(datanext);
+							filedataprev.next = filedatanext.node;
+							WriteNode(dir, filedataprev.node.toString(), JSON.stringify(filedataprev), function(){
+								filedatanext.prev = filedataprev.node;
+                            	WriteNode(dir, filedatanext.node.toString(), JSON.stringify(filedatanext), function(){
+									fs.unlink(dir+"/"+self.keydict[key].toString(), function(err){
+										if(filedatanext.node==self.tail.node)
+											self.tail.prev = filedatanext.prev;
+										delete self.keydict[key];
+                            			if(err) throw err;
+                            			else {										
+											self.DeleteFileKeys(dir, keys, cb);
+										}
+									});
+								});
+							});
+						});
+					});
+				});
+			}
+		} else throw "Error: No key in dictionary!";
+	}
+}
+
+FileDOWN.prototype.UpdateTree = function(dir, node, cb) {
+	var self = this;
+
+	if(!node.next) {
+		this.tail = {node:node.node, next:node.next, prev:node.prev, key:node.key, value:node.value};
+		cb();
+	} else {
+		ReadNode(dir, node.next.toString(), function(data) {
+			var nodedata = JSON.parse(data);
+			self._store[self._location] = self._store[self._location].insert(nodedata.key, nodedata.value);
+			self.keydict[nodedata.key] = nodedata.node;
+			self.UpdateTree(dir, nodedata, cb);
+		});
+	}
+}
+
+FileDOWN.prototype._open = function (options, callback) {
+  var self = this;
+
+  fs.stat(options.name, function(err, stat){
+  	if(err && err.errno==-2) {
+		fs.mkdir(options.name, function(err){
+			if(err) throw err;
+			else {
+				ReadBaseNode.call(self, options.name, function(data){
+					self.head = {node:data.node, next:data.next, prev:data.prev, key:data.key, value:data.value};
+					self.tail = {node:data.node, next:data.next, prev:data.prev, key:data.key, value:data.value};
+					callback(null, self);
+				});
+			}
+		});
+	} else if (err && err.errno!=-2)
+		throw err;
+	else {
+		ReadBaseNode.call(self, options.name, function(data){
+        	self.head = {node:data.node, next:data.next, prev:data.prev, key:data.key, value:data.value};
+			self.UpdateTree(options.name, data, function(){
+				callback(null, self);
+			});
+		});
+	}
+
+  });
+  //setImmediate(function callNext() { callback(null, self) })
+
+}
+
+FileDOWN.prototype._put = function (key, value, options, callback) {
+  var keyupdate = [], keyinsert = [], self = this;
+
+  if (typeof value === 'undefined' || value === null) value = ''
+
+  var iter = this._store[this._location].find(key)
+
+  if (iter.valid) {
+    this._store[this._location] = iter.update(value);
+	keyupdate.push(key);
+  } else {
+    this._store[this._location] = this._store[this._location].insert(key, value)
+	keyinsert.push(key);
+  }
+
+  this.InsertFileKeys(options.name, keyinsert, function(){
+    self.UpdateFileKeys(options.name, keyupdate, function(){
+  		setImmediate(callback);
+	});
+  });
+}
+
+FileDOWN.prototype._get = function (key, options, callback) {
+  var value = this._store[this._location].get(key)
+
+  if (value === undefined) {
+    // 'NotFound' error, consistent with LevelDOWN API
+    var err = new Error('NotFound')
+    return setImmediate(function callNext() { callback(err) })
+  }
+
+  if (options.asBuffer !== false && !this._isBuffer(value))
+    value = new Buffer(String(value))
+
+  setImmediate(function callNext () {
+    callback(null, value)
+  })
+
+}
+
+FileDOWN.prototype._del = function (key, options, callback) {
+  var keys = [];
+
+  keys.push(key);
+
+  this._store[this._location] = this._store[this._location].remove(key);
+
+  this.DeleteFileKeys(options.name, keys, function(){
+  	setImmediate(callback)
+  });
+}
+
+FileDOWN.prototype._batch = function (array, options, callback) {
+  var err
+    , cnt = 0
+	, i = -1
+    , key
+    , value
+    , iter
+    , len = array.length
+    , tree = this._store[this._location]
+	, keydelete = []
+	, keyupdate = []
+	, keyinsert = []
+
+  var self = this;
+
+  while (++i < len) {
+    if (!array[i])
+      continue;
+
+    key = this._isBuffer(array[i].key) ? array[i].key : String(array[i].key)
+    err = this._checkKey(key, 'key')
+    if (err)
+      return setImmediate(function errorCall() { callback(err) })
+
+    iter = tree.find(key)
+
+    if (array[i].type === 'put') {
+      value = this._isBuffer(array[i].value) ? array[i].value : String(array[i].value)
+      if (value === null || value === undefined)
+        err = new Error('value cannot be `null` or `undefined`')
+
+      if (err)
+        return setImmediate(function errorCall() { callback(err) })
+
+	  if(iter.valid) {
+		keyupdate.push(key);
+		tree = iter.update(value);
+	  } else {
+		keyinsert.push(key);
+		tree = tree.insert(key, value);
+	  }
+    } else {
+	  keydelete.push(key);
+      tree = iter.remove()
+    }
+  }
+
+  this._store[this._location] = tree;
+
+  this.InsertFileKeys(options.name, keyinsert, function(){
+	self.UpdateFileKeys(options.name, keyupdate, function(){
+  		self.DeleteFileKeys(options.name, keydelete, function(){
+    		setImmediate(callback);
+  		});
+	});
+  });
+}
+
+FileDOWN.prototype._iterator = function (options) {
+  return new MemIterator(this, options)
+}
+
+FileDOWN.prototype._isBuffer = function (obj) {
+  return Buffer.isBuffer(obj)
+}
+
+FileDOWN.destroy = function (name, callback) {
+  var key = toKey(name)
+
+  if (key in globalStore)
+    delete globalStore[key]
+
+  setImmediate(callback)
+}
+
+module.exports = FileDOWN
